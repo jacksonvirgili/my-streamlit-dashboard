@@ -347,9 +347,9 @@ def plot_2x2(df_grouped, produto, mes, ano):
 # ###############   PÁGINA 1 — CONSOLIDADO   ###############
 # ------------------------------------------------------
 
-if pagina == "Consolidado D-1":
+if pagina == "Consolidado":
 
-    st.header("Consolidado D-1")
+    st.header("Consolidado")
 
     # ------------- SIDEBAR -------------
     st.sidebar.header("Filtros")
