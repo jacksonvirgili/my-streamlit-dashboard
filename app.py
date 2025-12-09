@@ -218,6 +218,7 @@ def calcular_acumulados(df_filtrado):
     ).fillna(0)
 
     df_grouped['DESVIO_ACUM'] = df_grouped['REAL_ACUM'] - df_grouped['META_ACUM']
+    df_grouped['DESVIO_DIA_R$'] = (df_grouped['Real_Variacao'] - df_grouped['Meta Dia'])
 
     df_grouped['DESVIO_ACUM_PCT'] = (
         (df_grouped['REAL_ACUM'] - df_grouped['META_ACUM']) /
@@ -277,7 +278,7 @@ def plot_2x2(df_grouped, produto, mes, ano):
 
     # ------- DIÁRIO -------
     if modo == "Diário":
-        df["DesvioLabel"] = df["DESVIO_DIA_PCT"].apply(lambda x: "Positivo" if x >= 0 else "Negativo")
+        df["DesvioLabel"] = df['DESVIO_DIA_R$'].apply(lambda x: "Positivo" if x >= 0 else "Negativo")
 
         fig1 = go.Figure()
         fig1.add_bar(
@@ -302,12 +303,12 @@ def plot_2x2(df_grouped, produto, mes, ano):
         fig2 = go.Figure()
         fig2.add_bar(
             x=df["DataLabel"],
-            y=df["DESVIO_DIA_PCT"],
-            marker_color=["#EA9411" if x >= 0 else "gray" for x in df["DESVIO_DIA_PCT"]],
-            hovertemplate='<b>Data:</b> %{x}<br><b>Desvio Diário:</b> %{y:.2f}%<extra></extra>'
+            y=df["DESVIO_DIA_R$"],
+            marker_color=["#EA9411" if x >= 0 else "gray" for x in df["DESVIO_DIA_R$"]],
+            hovertemplate='<b>Data:</b> %{x}<br><b>Desvio Diário:</b> R$ %{y:,.2f}<extra></extra>'
         )
         fig2.add_hline(y=0, line_color="blue")
-        fig2.update_layout(title="Desvio Diário (%)")
+        fig2.update_layout(title="Desvio Diário R$")
         fig2 = aplicar_estilo(fig2)
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -410,7 +411,7 @@ if pagina == "Consolidado":
     df_exibir = df_grouped.copy()
 
     # Remover colunas da tabela final
-    cols_remover = ["DIAS", "Real_Variacao", "REAL_ACUM", "META_ACUM", "DESVIO_ACUM"]
+    cols_remover = ["DIAS", "Real_Variacao", "REAL_ACUM", "META_ACUM", "DESVIO_ACUM","DESVIO_DIA_R$"]
     df_exibir = df_exibir.drop(columns=[c for c in cols_remover if c in df_exibir.columns])
 
     # Renomear colunas
@@ -429,6 +430,22 @@ if pagina == "Consolidado":
     df_exibir['Producao Acumulada'] = df_grouped['REAL_ACUM'].apply(format_large_numbers)
     df_exibir['Meta Acumulada'] = df_grouped['META_ACUM'].apply(format_large_numbers)
     df_exibir['Desvio Acumulado'] = df_grouped['DESVIO_ACUM'].apply(format_large_numbers)
+    df_exibir['Desvio Dia'] = df_grouped['DESVIO_DIA_R$'].apply(format_large_numbers)
+
+    ordem = [
+        "Data",
+        "Producao Dia",
+        "Meta Dia",
+        "Desvio Dia",
+        "Desvio Dia %",
+        "Producao Acumulada",
+        "Meta Acumulada",
+        "Desvio Acumulado",
+        "Desvio Acumulado %"
+
+    ]
+
+    df_exibir = df_exibir[ordem]
 
     # Exibir
     st.dataframe(df_exibir, use_container_width=True)
@@ -570,7 +587,8 @@ elif pagina == "Ranking e Metas":
         fig.update_layout(
             title=f"Ranking {grupo} ({mes}/{ano})",
             template="plotly_white",
-            height=len(ranking) * 60
+            height=len(ranking) * 60,
+            dragmode=False,
         )
 
         st.plotly_chart(fig, use_container_width=True)
@@ -603,10 +621,20 @@ elif pagina == "Ranking e Metas":
         ranking['Cor'] = ranking['Desvio'].apply(lambda x: "#EA9411" if x > 0 else "gray")
         ranking.sort_values('Desvio', inplace=True)
 
+        # Quebra o nome em duas linhas
+        def wrap(texto):
+            palavras = texto.split()
+            if len(palavras) <= 1:
+                return texto
+            meio = len(palavras) // 2
+            return f"{' '.join(palavras[:meio])}<br>{' '.join(palavras[meio:])}"
+
+        ranking["label_wrap"] = ranking[grupo].apply(wrap)
+
         fig = go.Figure()
 
         fig.add_bar(
-            y=ranking[grupo],
+            y=ranking["label_wrap"],
             x=ranking["Desvio"],
             orientation="h",
             marker_color=ranking['Cor'],
@@ -619,7 +647,7 @@ elif pagina == "Ranking e Metas":
             template="plotly_white",
             height=len(ranking) * 50,
             xaxis_title="Desvio (Valor)",
-            yaxis_title=grupo
+            dragmode=False,
         )
 
         st.plotly_chart(fig, use_container_width=True)
@@ -634,32 +662,89 @@ elif pagina == "Ranking e Metas":
 
         df_tab = ranking.copy()
 
-        # Remover colunas desnecessárias
+        # ----------------------------------------------------
+        # 1. RENOMEAR COLUNAS PARA EXIBIÇÃO
+        # ----------------------------------------------------
+        rename_map = {
+            'Real_Variacao': 'Produção_Mensal',
+            'Meta Dia': 'Meta_Mensal',
+            'Real_Acumulada': 'Produção Mensal',
+            'Meta_Acumulada': 'Meta Mensal'
+        }
+        df_tab = df_tab.rename(columns={k: v for k, v in rename_map.items() if k in df_tab.columns})
+
+        # ----------------------------------------------------
+        # 2. REMOVER COLUNAS AUXILIARES
+        # ----------------------------------------------------
         if tipo_ranking == "Produção":
             if 'label_wrap' in df_tab.columns:
                 df_tab = df_tab.drop(columns=['label_wrap'])
         else:  # Ranking por Desvio
-            if 'Cor' in df_tab.columns:
-                df_tab = df_tab.drop(columns=['Cor'])
-            # Formatar Real_Variacao e Meta Dia (se existirem)
-            for col in ['Real_Variacao', 'Meta Dia']:
-                if col in df_tab.columns:
-                    df_tab[col] = df_tab[col].apply(format_large_numbers)
+            cols_to_drop = [c for c in ['label_wrap', 'Cor'] if c in df_tab.columns]
+            if cols_to_drop:
+                df_tab = df_tab.drop(columns=cols_to_drop)
 
-        # Formatação elegante
-        for col in ['Real_Acumulada', 'Meta_Acumulada', 'Desvio']:
+        # ----------------------------------------------------
+        # 3. GARANTIR COLUNA 'Desvio' (R$) NO RANKING PRODUÇÃO
+        # ----------------------------------------------------
+        if tipo_ranking == "Produção":
+            # Esperamos que o ranking de Produção tenha Real_Acumulada e Meta_Acumulada
+            if 'Produção Mensal' in df_tab.columns and 'Meta Mensal' in df_tab.columns:
+                df_tab['Produção Mensal'] = pd.to_numeric(df_tab['Produção Mensal'], errors='coerce')
+                df_tab['Meta Mensal'] = pd.to_numeric(df_tab['Meta Mensal'], errors='coerce')
+                df_tab['Desvio'] = df_tab['Produção Mensal'] - df_tab['Meta Mensal']
+        else:
+            # No ranking por Desvio assumimos que 'Desvio' já existe no dataframe (calculado em plot_ranking_desvio)
+            # Não criamos 'Desvio R$' extra aqui.
+            pass
+
+        # ----------------------------------------------------
+        # 4. FORMATAÇÃO NÚMEROS GRANDES (R$)
+        # ----------------------------------------------------
+        for col in ['Produção_Mensal', 'Meta_Mensal', 'Produção Mensal', 'Meta Mensal', 'Desvio']:
             if col in df_tab.columns:
-                df_tab[col] = df_tab[col].apply(format_large_numbers)
+                df_tab[col] = df_tab[col].apply(lambda x: format_large_numbers(x) if pd.notna(x) and x != "" else "")
 
-        # Formatar % e impacto
-        if 'Desvio_%' in df_tab:
+        # ----------------------------------------------------
+        # 5. FORMATAR PORCENTAGENS
+        # ----------------------------------------------------
+        if 'Desvio_%' in df_tab.columns:
             df_tab['Desvio_%'] = (df_tab['Desvio_%'] * 100).round(2).astype(str) + '%'
-        if 'Peso_Producao_%' in df_tab:
+        if 'Peso_Producao_%' in df_tab.columns:
             df_tab['Peso_Producao_%'] = (df_tab['Peso_Producao_%'] * 100).round(2).astype(str) + '%'
-        if 'Impacto' in df_tab:
+        if 'Impacto' in df_tab.columns:
             df_tab['Impacto'] = (df_tab['Impacto'] * 100).round(2).astype(str) + '%'
 
-        # Aplicar estilo: coluna Impacto com fundo cinza escuro
+        # ----------------------------------------------------
+        # 6. ORDEM DAS COLUNAS
+        # ----------------------------------------------------
+        if tipo_ranking == "Produção":
+            ordem = [
+                grupo,
+                "Produção Mensal",
+                "Meta Mensal",
+                "Desvio",
+                "Peso_Producao_%",
+                "Desvio_%",
+                "Impacto"
+            ]
+        else:
+            ordem = [
+                grupo,
+                'Produção_Mensal',
+                "Meta_Mensal",
+                "Desvio",
+                "Peso_Producao_%",
+                "Desvio_%",
+                "Impacto"
+            ]
+
+        ordem_final = [c for c in ordem if c in df_tab.columns]
+        df_tab = df_tab.reindex(columns=ordem_final)
+
+        # ----------------------------------------------------
+        # 7. ESTILO (Impacto em cinza)
+        # ----------------------------------------------------
         if 'Impacto' in df_tab.columns:
             df_tab_styled = df_tab.style.applymap(
                 lambda x: 'background-color: #4d4d4d; color: white;' if isinstance(x, str) and x.endswith('%') else '',
@@ -669,7 +754,9 @@ elif pagina == "Ranking e Metas":
         else:
             st.dataframe(df_tab, use_container_width=True)
 
-        # Download CSV
+        # ----------------------------------------------------
+        # 8. DOWNLOAD CSV
+        # ----------------------------------------------------
         csv = df_tab.to_csv(index=False, encoding='utf-8-sig')
         st.download_button(
             label="Baixar tabela em CSV",
