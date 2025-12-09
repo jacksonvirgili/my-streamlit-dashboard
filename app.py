@@ -589,6 +589,13 @@ elif pagina == "Ranking e Metas":
             template="plotly_white",
             height=len(ranking) * 60,
             dragmode=False,
+            legend=dict(
+                orientation="h",  # horizontal
+                yanchor="bottom",
+                y=0.98,           # acima do gráfico
+                xanchor="center",
+                x=0.5
+            )
         )
 
         st.plotly_chart(fig, use_container_width=True)
