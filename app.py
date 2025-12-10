@@ -587,7 +587,7 @@ elif pagina == "Ranking e Metas":
         fig.update_layout(
             title=f"Ranking {grupo} ({mes}/{ano})",
             template="plotly_white",
-            height=len(ranking) * 60,
+            height=max(len(ranking) * 50,300),
             dragmode=False,
             legend=dict(
                 orientation="h",  # horizontal
@@ -652,7 +652,7 @@ elif pagina == "Ranking e Metas":
         fig.update_layout(
             title=f"Ranking por Desvio — {grupo} ({mes}/{ano})",
             template="plotly_white",
-            height=len(ranking) * 50,
+            height=max(len(ranking) * 50,300),
             xaxis_title="Desvio (Valor)",
             dragmode=False,
         )
