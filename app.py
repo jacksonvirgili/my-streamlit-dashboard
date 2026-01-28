@@ -8,635 +8,1420 @@ Original file is located at
 """
 
 # app.py
+# ======================================================
+# DASHBOARD – CONSOLIDADO | RANKING E METAS
+# ======================================================
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re
-import streamlit as st
-import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 import plotly.graph_objects as go
-import plotly.express as px
 
-# ------------------------------
-# Configuração do app
-# ------------------------------
-st.set_page_config(layout='wide', page_icon="assets/icons/OIP.png")
+# ------------------------------------------------------
+# Layout e Título
+# ------------------------------------------------------
+st.set_page_config(page_title="Acomp. Diário de Vendas FACTA D-1  (Visão 360º)", layout="wide")
 
-# ------------------------------
-# Carregamento do arquivo local
-# ------------------------------
-EXCEL_PATH = "consolidado.xlsx"
+#------------------------------------------------------
+# Cache e carregamento da base
+#------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
-def carregar_excel_local(caminho):
-    """Carrega Excel local com múltiplas abas e retorna um dicionário de DataFrames"""
-    try:
-        xls = pd.read_excel(caminho, sheet_name=None)
-        return xls
-    except Exception as e:
-        st.error(f"Erro ao carregar Excel: {e}")
-        st.stop()
-
-rede = carregar_excel_local(EXCEL_PATH)
-
-# ------------------------------
-# Função de limpeza de moeda
-# ------------------------------
-def limpar_moeda(valor):
-    """Limpa valores monetários no formato R$ 1.234,56 -> 1234.56"""
-    if pd.isna(valor):
-        return 0.0
-    if isinstance(valor, (int, float, np.number)):
-        return valor
-    if isinstance(valor, str):
-        v = valor.strip()
-        if v in ("-", ""):
-            return 0.0
-        v = v.replace("R$", "").replace("r$", "").strip()
-        v = re.sub(r"\.(?=\d{3},)", "", v)
-        v = v.replace(",", ".")
-        try:
-            return float(v)
-        except:
-            return 0.0
-    return 0.0
-
-# ------------------------------
-# Colunas que precisam de conversão
-# ------------------------------
-colunas_para_converter = [
-    'Real', 'Meta Mês', 'Ticket Médio',
-    'Novo', 'Refin', 'PORT + Refin da Port >=1,85',
-    'Refin da Port < 1,85', 'Rep. Legal', 'META AUMENTO MARGEM'
-]
-
-# ------------------------------
-# Aplica função de limpeza a todas as abas
-# ------------------------------
-for nome_aba, df in rede.items():
-    for col in colunas_para_converter:
-        if col in df.columns and df[col].dtype == object:
-            df[col] = df[col].apply(limpar_moeda)
-    rede[nome_aba] = df  # garante atualização no dicionário
-
-# ---------- CONVERTER COLUNA DE DATAS ---------- #
-for nome_aba, df in rede.items():
-    if 'Data' in df.columns:
-        df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
-        rede[nome_aba] = df
-
-# ---------- FUNÇÃO ADICIONAR DIAS ---------- #
-def adicionar_dias(df):
-    df = df.copy()
-    if 'Data' in df.columns and 'Nome_Loja' in df.columns:
-        df['ano_mes'] = df['Data'].dt.to_period('M')
-        contagem = df.groupby(['Nome_Loja', 'ano_mes']).size().rename('DIAS')
-        df = df.join(contagem, on=['Nome_Loja', 'ano_mes'])
-        df = df.drop(columns=['ano_mes'])
+@st.cache_data
+def carregar_base():
+    df = pd.read_parquet("consolidado.parquet")
+    df["Data"] = pd.to_datetime(df["Data"])
     return df
 
-# ---------- APLICAR FUNÇÃO EM TODAS AS ABAS ---------- #
-for nome_aba, df in rede.items():
-    rede[nome_aba] = adicionar_dias(df)
+rede = carregar_base()
 
-# ---------- PREENCHER META MÊS ---------- #
-def preencher_meta_mes(df):
-    df = df.copy()
-    if 'Data' in df.columns and 'Nome_Loja' in df.columns and 'Meta Mês' in df.columns:
-        df['ano_mes'] = df['Data'].dt.to_period('M')
-        df['Meta Mês'] = (
-            df['Meta Mês'].replace(0, pd.NA)
-            .groupby([df['Nome_Loja'], df['ano_mes']])
-            .transform(lambda x: x.bfill())
-            .fillna(0)
+#-----------------------------------------------------
+# Mapa para produtos zerados
+#------------------------------------------------------
+def padronizar_base_dias_sem_producao(df: pd.DataFrame) -> pd.DataFrame:
+
+    colunas_id = [
+        "Data", "Nome_Loja", "Coordenador",
+        "Regional", "ano", "mes"
+    ]
+
+    # -------------------------------------------------
+    # 1️⃣ PRODUTOS NORMAIS (tudo que NÃO é CONSIG)
+    # -------------------------------------------------
+    df_outros = df[
+        colunas_id + ["produto", "dia_sem_producao"]
+    ].copy()
+
+    df_outros["dia_sem_producao"] = (
+        df_outros["dia_sem_producao"]
+        .fillna(1)
+        .astype(int)
+    )
+
+    # -------------------------------------------------
+    # 2️⃣ CONSIG → explode subprodutos
+    # -------------------------------------------------
+    mapa_consig = {
+        "Novo_sem_producao": "CONSIG_NOVO",
+        "Refin_sem_producao": "CONSIG_REFIN",
+        "Refin_Port_TX_INF_sem_producao": "CONSIG_PORT_TX_INF",
+        "PORT_E_Refin_TX_SUP_sem_producao": "CONSIG_PORT_TX_SUP"
+    }
+
+    df_consig = df[df["produto"] == "CONSIG"][
+        colunas_id + list(mapa_consig.keys())
+    ].copy()
+
+    df_consig = df_consig.melt(
+        id_vars=colunas_id,
+        value_vars=list(mapa_consig.keys()),
+        var_name="subproduto",
+        value_name="dia_sem_producao"
+    )
+
+    df_consig["produto"] = df_consig["subproduto"].map(mapa_consig)
+
+    df_consig = df_consig[
+        colunas_id + ["produto", "dia_sem_producao"]
+    ]
+
+    df_consig["dia_sem_producao"] = (
+        df_consig["dia_sem_producao"]
+        .fillna(1)
+        .astype(int)
+    )
+
+    # -------------------------------------------------
+    # 3️⃣ CONSOLIDA PORT_TX_INF + PORT_TX_SUP
+    #    regra: se um produziu → houve produção (max)
+    # -------------------------------------------------
+    produtos_tx = [
+        "CONSIG_PORT_TX_INF",
+        "CONSIG_PORT_TX_SUP"
+    ]
+
+    df_tx = df_consig[df_consig["produto"].isin(produtos_tx)].copy()
+
+    df_tx_consolidado = (
+        df_tx
+        .groupby(
+            colunas_id,
+            as_index=False
         )
-        df = df.drop(columns=['ano_mes'])
-    return df
+        .agg(
+            dia_sem_producao=("dia_sem_producao", lambda x: int((x == 1).all()))
+        )
+    )
 
-# Aplica a todas as abas
-for nome_aba, df in rede.items():
-    rede[nome_aba] = preencher_meta_mes(df)
+    df_tx_consolidado["produto"] = "CONSIG_PORT"
 
-# ---------- CALCULAR VARIAÇÃO ---------- #
-def calcular_variacao(df):
-    df = df.copy()
-    if 'Data' in df.columns and 'Nome_Loja' in df.columns and 'Real' in df.columns:
-        df["data_aux"] = df['Data']
-        df["ano_mes"] = df["data_aux"].dt.to_period("M")
-        df = df.sort_values(["Nome_Loja", "ano_mes", "data_aux"])
+    # -------------------------------------------------
+    # 4️⃣ Remove os TX originais e junta tudo
+    # -------------------------------------------------
+    df_consig_final = df_consig[
+        ~df_consig["produto"].isin(produtos_tx)
+    ]
 
-        def variacao_grupo(x):
-            var = x - x.shift(1)
-            var.iloc[0] = x.iloc[0]
-            return var
+    df_final = pd.concat(
+        [
+            df_outros,
+            df_consig_final,
+            df_tx_consolidado
+        ],
+        ignore_index=True
+    )
 
-        df["Real_Variacao"] = df.groupby(["Nome_Loja", "ano_mes"])["Real"].transform(variacao_grupo)
-        df = df.drop(columns=["ano_mes", "data_aux"], errors='ignore')
-    return df
+    return df_final
 
-# Aplica a todas as abas
-for nome_aba, df in rede.items():
-    rede[nome_aba] = calcular_variacao(df)
+#-------------------------------------------------------
+# Base dos KPI's
+#------------------------------------------------------
+@st.cache_data
+def preparar_kpi_mensal(rede: pd.DataFrame) -> pd.DataFrame:
 
-# ---------- CALCULAR META DIA ---------- #
-def calcular_meta_dia(df):
-    df = df.copy()
-    if 'Meta Mês' in df.columns and 'DIAS' in df.columns:
-        df['Meta Dia'] = df['Meta Mês'] / df['DIAS']
-    return df
+    df = rede.sort_values("Data")
 
-# Aplica a todas as abas
-for nome_aba, df in rede.items():
-    rede[nome_aba] = calcular_meta_dia(df)
+    # ======================================================
+    # 1️⃣ AGREGA PRIMEIRO NO NÍVEL DE LOJA
+    # ======================================================
+    loja = (
+        df.groupby(
+            ["produto", "Regional", "Nome_Loja", "ano", "mes"],
+            as_index=False
+        )
+        .agg(
+            real_acum=("Real_Acumulada", "last"),
+            meta_acum=("Meta Mês", "last"),
+            produtividade=("produtividade", "mean"),
+            qtd_operadores=("Qtd Operadores C/Meta", "last"),
+            qtd_ating=("Qtd Operadores Ating. Meta", "last"),
+            lojas_zeradas=("dias_sem_producao_acumulado", "max"),
+            dias_zerados=("dia_sem_producao", "sum")
+        )
+    )
 
-rede = pd.concat(
-    [df.assign(Produto=nome) for nome, df in rede.items()]
-)
+    # ======================================================
+    # 2️⃣ CONSOLIDA PARA REGIONAL (SOMA DAS LOJAS)
+    # ======================================================
+    kpi = (
+        loja.groupby(
+            ["produto", "Regional", "ano", "mes"],
+            as_index=False
+        )
+        .agg(
+            real_acum=("real_acum", "sum"),
+            meta_acum=("meta_acum", "sum"),
+            produtividade=("produtividade", "mean"),
+            qtd_operadores=("qtd_operadores", "sum"),
+            qtd_ating=("qtd_ating", "sum"),
+            lojas_zeradas=("lojas_zeradas", "sum"),
+            qtd_lojas=("Nome_Loja", "nunique")
+        )
+    )
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-from matplotlib import pyplot as plt
-from matplotlib.ticker import FuncFormatter
+    # ======================================================
+    # 3️⃣ KPIs DERIVADOS
+    # ======================================================
+    kpi["ating_pct"] = (
+        kpi["real_acum"] /
+        kpi["meta_acum"].replace(0, np.nan)
+    ) * 100
+
+    kpi["dispersao_pct"] = (
+        1 -
+        (kpi["qtd_ating"] / kpi["qtd_operadores"].replace(0, np.nan))
+    ) * 100
+
+    kpi["dias_zerados_media"] = (
+        kpi["lojas_zeradas"] /
+        kpi["qtd_lojas"].replace(0, np.nan)
+    )
+
+    return kpi.fillna(0)
+
+# ======================================================
+# BASES CANÔNICAS
+# ======================================================
+
+base_zerado = padronizar_base_dias_sem_producao(rede)
+kpi_mensal = preparar_kpi_mensal(rede)
 
 # ------------------------------------------------------
-# INÍCIO — TÍTULO PRINCIPAL
+# Formatações
 # ------------------------------------------------------
-st.title("Desempenho Comercial")
-
-paginas = [
-    "Consolidado",
-    "Ranking e Metas"
-]
-
-pagina = st.selectbox("Selecione a página:", paginas)
-
-# ------------------------------------------------------
-# FUNÇÕES COMPARTILHADAS (para ambas as páginas)
-# ------------------------------------------------------
-
-def format_large_numbers(value):
-    if value is None or pd.isna(value):
-        return ""
-    return f"R$ {value:,.0f}".replace(",", ".")
-
-
-def filtrar_df(rede, produto, regional, coordenador, loja, mes, ano):
-    df_f = rede.copy()
-
-    if produto != 'Todos':
-        df_f = df_f[df_f['Produto'] == produto]
-    if regional != 'Todas':
-        df_f = df_f[df_f['Regional'] == regional]
-    if coordenador != 'Todos':
-        df_f = df_f[df_f['Coordenador'] == coordenador]
-    if loja != 'Todas':
-        df_f = df_f[df_f['Nome_Loja'] == loja]
-
-    df_f = df_f[(df_f['Data'].dt.year == int(ano)) &
-                (df_f['Data'].dt.month == int(mes))]
-
-    return df_f
-
-
-def calcular_acumulados(df_filtrado):
-    df_grouped = df_filtrado.groupby('Data', as_index=False).agg({
-        'DIAS': 'sum',
-        'Real_Variacao': 'sum',
-        'Meta Dia': 'sum'
-    }).sort_values('Data').reset_index(drop=True)
-
-    df_grouped['REAL_ACUM'] = df_grouped['Real_Variacao'].cumsum()
-    df_grouped['META_ACUM'] = df_grouped['Meta Dia'].cumsum()
-
-    df_grouped['DESVIO_DIA_PCT'] = (
-        (df_grouped['Real_Variacao'] - df_grouped['Meta Dia']) /
-        df_grouped['Meta Dia'].replace(0, np.nan) * 100
-    ).fillna(0)
-
-    df_grouped['DESVIO_ACUM'] = df_grouped['REAL_ACUM'] - df_grouped['META_ACUM']
-    df_grouped['DESVIO_DIA_R$'] = (df_grouped['Real_Variacao'] - df_grouped['Meta Dia'])
-
-    df_grouped['DESVIO_ACUM_PCT'] = (
-        (df_grouped['REAL_ACUM'] - df_grouped['META_ACUM']) /
-        df_grouped['META_ACUM'].replace(0, np.nan) * 100
-    ).fillna(0)
-
-    return df_grouped
-
 
 def aplicar_estilo(fig):
     fig.update_layout(
         template="plotly_white",
-        autosize=True,
         dragmode=False,
+        margin=dict(l=10, r=10, t=80, b=40),
         legend=dict(
             orientation="h",
-            yanchor="bottom",
-            y=1,
-            xanchor="left",
+            y=1.05,
             x=0,
-            bgcolor="rgba(255,255,255,0.5)",
-            bordercolor="rgba(0,0,0,0.15)",
+            bgcolor="rgba(255,255,255,0.6)",
+            bordercolor="rgba(0,0,0,0.1)",
             borderwidth=1
         ),
-        margin=dict(l=10, r=10, t=120, b=10),
         font=dict(size=12)
     )
-    fig.update_xaxes(tickangle=30, automargin=True)
-    fig.update_yaxes(automargin=True)
+    fig.update_xaxes(tickangle=30)
     return fig
 
 
-# =====================================================
-# FUNÇÃO DOS GRÁFICOS 2x2 (CONSOLIDADO)
-# =====================================================
-def plot_2x2(df_grouped, produto, mes, ano):
+def fmt_moeda(v):
+    return f"R$ {v:,.0f}".replace(",", ".")
 
-    st.subheader(f"{produto} — {mes}/{ano}")
+def montar_customdata(df, cols):
+    if not cols:
+        return None
 
-    if not pd.api.types.is_datetime64_any_dtype(df_grouped["Data"]):
-        df_grouped["Data"] = pd.to_datetime(df_grouped["Data"])
+    cols_existentes = [c for c in cols if c in df.columns]
 
-    first_day = pd.Timestamp(year=ano, month=mes, day=1)
-    last_day = first_day + pd.offsets.MonthEnd(0)
-    full_dates = pd.DataFrame({"Data": pd.date_range(first_day, last_day, freq="D")})
+    if not cols_existentes:
+        return None
 
-    df = full_dates.merge(df_grouped, on="Data", how="left")
-    df["DataLabel"] = df["Data"].dt.strftime("%d/%m")
+    return df[cols_existentes]
 
-    df = df[~(df["Real_Variacao"].isna() & df["Meta Dia"].isna())]
+# ------------------------------------------------------
+# Funções de cálculos para gráficos de realizado/meta
+# ------------------------------------------------------
 
-    modo = st.radio(
-        "Selecione a visualização:",
+def agregar(df, nivel):
+    mapa = {
+        "Real_Variacao": "sum",
+        "Meta Dia": "sum",
+        "Real_Acumulada": "sum",
+        "Meta_Acumulada": "sum",
+        "Meta Mês": "sum",
+        "Real": "sum",
+        "DESVIO_DIA": "sum",
+        'Qtd Operadores C/Meta': 'sum',
+        'Qtd Operadores Ating. Meta': 'sum'
+
+    }
+
+    out = (
+        df.groupby(nivel, as_index=False)
+        .agg(mapa)
+        .sort_values(nivel)
+    )
+
+    out["DESVIO_DIA_PCT"] = (
+        out["DESVIO_DIA"] /
+        out["Meta Dia"].replace(0, np.nan)
+    ) * 100
+
+    out["DESVIO_ACUM"] = out["Real_Acumulada"] - out["Meta_Acumulada"]
+
+    out["DESVIO_ACUM_PCT"] = (
+        out["DESVIO_ACUM"] /
+        out["Meta_Acumulada"].replace(0, np.nan)
+    ) * 100
+
+    out = out.fillna(0)
+    out = calcular_pct_atingimento(out)
+    return out
+
+
+#--------------------------------------------------
+# calulos de produtividade
+#--------------------------------------------------
+def agregar_produtividade_diaria_com_media(df):
+    out = (
+        df.groupby("Data", as_index=False)
+          .agg({
+              "produtividade": "mean",
+              "Qtd Operadores C/Meta": "sum",
+              "Qtd Operadores Ating. Meta": "sum"
+          })
+          .sort_values("Data")
+    )
+
+    media_mensal = out["produtividade"].mean()
+    out["MEDIA_MENSAL"] = media_mensal
+
+    out["DESVIO_MEDIA_MENSAL"] = out["produtividade"] - media_mensal
+
+    out["DESVIO_MEDIA_MENSAL_PCT"] = (
+        out["DESVIO_MEDIA_MENSAL"] / media_mensal
+        if media_mensal != 0 else 0
+    ) * 100
+
+    out = out.fillna(0)
+    out = calcular_pct_atingimento(out)
+    return out
+
+
+#------------------------------------------------
+# Base de comparação (consultor x média grupo)
+#-----------------------------------------------
+def construir_base_total_produtividade(
+    rede,
+    produto,
+    regional,
+    coordenador,
+    loja,
+    ano,
+    mes
+):
+    base = rede.copy()
+
+    # -------------------------
+    # FILTROS GERAIS
+    # -------------------------
+    if produto != 'Todos':
+        base = base[base['produto'] == produto]
+
+    base = base[
+        (base['ano'] == ano) &
+        (base['mes'] == mes)
+    ]
+
+    # ==================================================
+    # LOJA → OUTRAS LOJAS DO MESMO COORDENADOR
+    # ==================================================
+    if loja != 'Todas':
+
+        # Descobre o coordenador da loja
+        coord_loja = (
+            base.loc[base['Nome_Loja'] == loja, 'Coordenador']
+            .dropna()
+            .unique()
+        )
+
+        if len(coord_loja) == 0:
+            return pd.DataFrame()
+
+        coord_loja = coord_loja[0]
+
+        base = base[
+            (base['Coordenador'] == coord_loja) &
+            (base['Nome_Loja'] != loja)
+        ]
+
+    # ==================================================
+    # COORDENADOR → OUTROS COORDENADORES DA REGIONAL
+    # ==================================================
+    elif coordenador != 'Todos':
+
+        # Descobre a regional do coordenador
+        reg_coord = (
+            base.loc[base['Coordenador'] == coordenador, 'Regional']
+            .dropna()
+            .unique()
+        )
+
+        if len(reg_coord) == 0:
+            return pd.DataFrame()
+
+        reg_coord = reg_coord[0]
+
+        base = base[
+            (base['Regional'] == reg_coord) &
+            (base['Coordenador'] != coordenador)
+        ]
+
+    # ==================================================
+    # REGIONAL → OUTRAS REGIONAIS
+    # ==================================================
+    elif regional != 'Todas':
+
+        base = base[
+            base['Regional'] != regional
+        ]
+
+    # ==================================================
+    # NADA SELECIONADO → MÉDIA DA REDE
+    # ==================================================
+    else:
+        pass
+
+    # -------------------------
+    # MÉDIA DIÁRIA DO GRUPO
+    # -------------------------
+    return (
+        base.groupby("Data", as_index=False)
+            .agg({
+                "produtividade": "mean",
+                "Qtd Operadores C/Meta": "sum",
+                "Qtd Operadores Ating. Meta": "sum"
+            })
+            .sort_values("Data")
+    )
+
+#------------------------------------------------------
+# porcentagem de atingimento
+#------------------------------------------------------
+def calcular_pct_atingimento(df):
+    if (
+        "Qtd Operadores C/Meta" not in df.columns or
+        "Qtd Operadores Ating. Meta" not in df.columns
+    ):
+        return df
+
+    df["Atingimento %"] = (
+        df["Qtd Operadores Ating. Meta"] /
+        df["Qtd Operadores C/Meta"].replace(0, 1)
+    ) * 100
+
+    return df
+
+
+# ------------------------------------------------------
+# GRÁFICO BASE CONSOLIDADO
+# ------------------------------------------------------
+def grafico_consolidado(df, eixo_x, tipo, titulo, label_total=None):
+
+    # -----------------------------
+    # EIXO X
+    # -----------------------------
+    if eixo_x == "Data":
+        x = df["Data"].dt.strftime("%d/%m")
+    else:
+        x = df[eixo_x].astype(str)
+
+    # -----------------------------
+    # INICIALIZA (NUNCA DEIXA HOVER DEFAULT)
+    # -----------------------------
+    y = None
+    y_meta = None
+    cores = "#EA9411"
+    titulo_y = ""
+    nome_barra = ""
+    hover_barra = None
+    label_linha = "Meta"
+
+    # -----------------------------
+    # TIPOS DE GRÁFICO ** excluir desvios da média em %
+    # -----------------------------
+    if tipo == "Diário":
+        y = df["Real_Variacao"]
+        y_meta = df["Meta Dia"]
+        titulo_y = "R$"
+        nome_barra = "Realizado"
+
+        hover_barra = (
+            "<b>Data:</b> %{x}<br>"
+            "<b>Real:</b> R$ %{y:,.2f}<br>"
+            "<b>Consultores c/Meta:</b> %{customdata[0]}<br>"
+            "<b>Consultores Ating:</b> %{customdata[1]}<br>"
+            "<b>Atingimento:</b> %{customdata[2]:.1f}%"
+            "<extra></extra>"
+        )
+
+    elif tipo == "Acumulado":
+        y = df["Real_Acumulada"]
+        y_meta = df["Meta_Acumulada"]
+        titulo_y = "R$"
+        nome_barra = "Realizado"
+
+        hover_barra = (
+            "<b>Data:</b> %{x}<br>"
+            "<b>Real:</b> R$ %{y:,.2f}<br>"
+            "<b>Consultores c/Meta:</b> %{customdata[0]}<br>"
+            "<b>Consultores Ating:</b> %{customdata[1]}<br>"
+            "<b>Atingimento:</b> %{customdata[2]:.1f}%"
+            "<extra></extra>"
+        )
+
+    elif tipo == "Desvio Diário (R$)":
+        y = df["DESVIO_DIA"]
+        titulo_y = "R$"
+        nome_barra = "Desvio (R$)"
+        cores = ["#EA9411" if v >= 0 else "gray" for v in y]
+
+        hover_barra = (
+            "<b>Data:</b> %{x}<br>"
+            "<b>Desvio:</b> R$ %{y:.2f}"
+            "<extra></extra>"
+        )
+
+    elif tipo == "Desvio vs Média (R$)":
+        y = df["DESVIO_MEDIA"]
+        titulo_y = "R$"
+        nome_barra = "Desvio Produtividade"
+        cores = ["#EA9411" if v >= 0 else "gray" for v in y]
+
+        hover_barra = (
+            "<b>Data:</b> %{x}<br>"
+            f"<b>Desvio:</b> R$ %{{y:,.2f}}"
+            "<extra></extra>"
+        )
+
+    elif tipo == "Desvio Acumulado (R$)":
+        y = df["DESVIO_ACUM"]
+        titulo_y = "R$"
+        nome_barra = "Desvio Acumulado"
+        cores = ["#EA9411" if v >= 0 else "gray" for v in y]
+
+        hover_barra = (
+            "<b>Data:</b> %{x}<br>"
+            "<b>Desvio:</b> R$ %{y:,.2f}"
+            "<extra></extra>"
+        )
+    elif tipo == "Produtividade Diária":
+        y = df["produtividade"]
+        y_meta = df["MEDIA_MENSAL"]
+        titulo_y = "Produtividade"
+        nome_barra = "Produtividade"
+        label_linha = "Média Mensal"
+
+        hover_barra = (
+            "<b>Data:</b> %{x}<br>"
+            "<b>Produtividade:</b> R$ %{y:,.2f}<br>"
+            "<b>Consultores c/Meta:</b> %{customdata[0]}<br>"
+            "<b>Consultores Ating:</b> %{customdata[1]}<br>"
+            "<b>Atingimento:</b> %{customdata[2]:.1f}%"
+            "<extra></extra>"
+        )
+    elif tipo == "Desvio vs Média Mensal (R$)":
+        y = df["DESVIO_MEDIA_MENSAL"]
+        titulo_y = "R$"
+        nome_barra = "Desvio vs Média Mensal"
+        cores = ["#EA9411" if v >= 0 else "gray" for v in y]
+
+        hover_barra = (
+            "<b>Data:</b> %{x}<br>"
+            "<b>Desvio:</b> R$ %{y:,.2f}"
+            "<extra></extra>"
+        )
+
+    # -----------------------------
+    # CONSTRUÇÃO DO GRÁFICO
+    # -----------------------------
+    fig = go.Figure()
+
+    fig.add_bar(
+        x=x,
+        y=y,
+        name=nome_barra,
+        marker_color=cores,
+        customdata=montar_customdata(df, ["Qtd Operadores C/Meta", "Qtd Operadores Ating. Meta","Atingimento %"]),
+        hovertemplate=hover_barra
+    )
+
+    if y_meta is not None:
+        fig.add_scatter(
+            x=x,
+            y=y_meta,
+            name=label_linha,
+            mode="lines+markers",
+            marker=dict(color="blue"),
+            hovertemplate=(
+                "<b>Data:</b> %{x}<br>"
+                f"<b>{label_linha}:</b> R$ %{{y:,.2f}}"
+                "<extra></extra>"
+            )
+        )
+
+
+    fig.update_layout(
+        title=titulo,
+        height=420,
+        yaxis_title=titulo_y
+    )
+
+    st.plotly_chart(
+        aplicar_estilo(fig),
+        use_container_width=True
+    )
+
+
+
+# ------------------------------------------------------
+# GRÁFICO COMPARATIVO (ENTIDADE X TOTAL)
+# ------------------------------------------------------
+def grafico_comparativo(df_sel, df_total, eixo_x, titulo, label_total, label_sel):
+
+    x = df_sel[eixo_x].dt.strftime("%d/%m")
+
+    fig = go.Figure()
+
+    # -----------------------------
+    # SELECIONADO
+    # -----------------------------
+    fig.add_bar(
+        x=x,
+        y=df_sel["produtividade"],
+        name=label_sel,
+        marker_color="#EA9411",
+        customdata=montar_customdata(
+            df_sel,
+            ["Qtd Operadores C/Meta", "Qtd Operadores Ating. Meta","Atingimento %"]
+        ),
+        hovertemplate=(
+            "<b>Data:</b> %{x}<br>"
+            f"<b>{label_sel}:</b> R$ %{{y:,.2f}}<br>"
+            "<b>Consultores c/Meta:</b> %{customdata[0]}<br>"
+            "<b>Consultores Ating:</b> %{customdata[1]}<br>"
+            "<b>% Atingimento:</b> %{customdata[2]:.1f}%"
+            "<extra></extra>"
+        )
+    )
+
+    # -----------------------------
+    # TOTAL DE REFERÊNCIA
+    # -----------------------------
+    fig.add_bar(
+        x=x,
+        y=df_total["produtividade"],
+        name=label_total,
+        marker_color="gray",
+        customdata=montar_customdata(
+            df_total,
+            ["Qtd Operadores C/Meta", "Qtd Operadores Ating. Meta","Atingimento %"]
+        ),
+        hovertemplate=(
+            "<b>Data:</b> %{x}<br>"
+            f"<b>{label_total}:</b> R$ %{{y:,.2f}}<br>"
+            "<b>Consultores c/Meta:</b> %{customdata[0]}<br>"
+            "<b>Consultores Ating:</b> %{customdata[1]}<br>"
+            "<b>Atingimento:</b> %{customdata[2]:.1f}%"
+            "<extra></extra>"
+        )
+    )
+
+
+    fig.update_layout(
+        barmode="group",
+        title=titulo,
+        height=420
+    )
+
+    st.plotly_chart(
+        aplicar_estilo(fig),
+        use_container_width=True
+    )
+
+#------------------------------------------------
+# Gráfico Produtividade
+#-----------------------------------------------
+
+def grafico_produtividade(df, eixo_x, titulo):
+
+    if eixo_x == "Data":
+        x = df["Data"].dt.strftime("%d/%m")
+    else:
+        x = df[eixo_x].astype(str)
+
+    fig = go.Figure()
+
+    fig.add_bar(
+        x=x,
+        y=df["produtividade"],
+        name="Produtividade",
+        marker_color="#EA9411",
+        hovertemplate=(
+            "<b>Data:</b> %{x}<br>"
+            "<b>Produtividade:</b> R$ %{y:.2f}<br>"
+            "<b>Consultores c/Meta:</b> %{customdata[0]}<br>"
+            "<b>Consultores Ating:</b> %{customdata[1]}<br>"
+            "<b>Atingimento:</b> %{customdata[2]:.1f}%"
+            "<extra></extra>"
+        )
+    )
+
+    fig.update_layout(
+        title=titulo,
+        height=420,
+        yaxis_title="Produtividade"
+    )
+
+    st.plotly_chart(
+        aplicar_estilo(fig),
+        use_container_width=True
+    )
+
+# ======================================================
+# APP
+# ======================================================
+
+st.title("Acomp. Diário de Vendas FACTA M-1 (Visão 360º)")
+
+pagina = st.selectbox("Página", ["Painel Executivo","Desempenho Comercial","Produtividade & Comparativos", "Ranking & Metas", "Análise por Produto"])
+
+#========================================================
+# Página inicial
+#========================================================
+if pagina == "Painel Executivo":
+
+    ano_kpi = st.sidebar.selectbox(
+        "Ano",
+        sorted(kpi_mensal["ano"].unique())
+    )
+
+    mes_kpi = st.sidebar.selectbox(
+        "Mês",
+        sorted(kpi_mensal["mes"].unique())
+    )
+
+    # -------------------------------------------------
+    # LISTA DE PRODUTOS
+    # -------------------------------------------------
+    produtos = sorted(kpi_mensal["produto"].unique())
+
+    for produto in produtos:
+
+        df = kpi_mensal[
+            (kpi_mensal["produto"] == produto) &
+            (kpi_mensal["ano"] == ano_kpi) &
+            (kpi_mensal["mes"] == mes_kpi)
+        ].copy()
+
+        if df.empty:
+            continue
+
+        # -------------------------------------------------
+        # RENOMEAR COLUNAS
+        # -------------------------------------------------
+        df.rename(columns={
+            "real_acum": "Real Acum",
+            "meta_acum": "Meta Acum",
+            "ating_pct": "Ating (%)",
+            "produtividade": "Produtividade",
+            "dispersao_pct": "Dispersão (%)",
+            "dias_zerados_media": "Média de dias zerados p/Loja",
+            "qtd_operadores": "Qtd Operadores",
+            "qtd_ating": "Qtd Ating"
+        }, inplace=True)
+
+        # -------------------------------------------------
+        # MÉTRICAS DERIVADAS
+        # -------------------------------------------------
+        df["Ating (%)"] = (df["Real Acum"] / df["Meta Acum"]) * 100
+        df["Ating (%)"] = df["Ating (%)"]
+        df["Dispersão (%)"] = df["Dispersão (%)"]
+
+        # -------------------------------------------------
+        # Cria df_fmt antes de gerar a coluna combinada
+        # -------------------------------------------------
+        df_fmt = df.copy()
+        df_fmt["Real Acum"] = df_fmt["Real Acum"].map(lambda x: f"R$ {x:,.2f}".replace(",", "."))
+        df_fmt["Meta Acum"] = df_fmt["Meta Acum"].map(lambda x: f"R$ {x:,.2f}".replace(",", "."))
+        df_fmt["Produtividade"] = df_fmt["Produtividade"].map(lambda x: f"R$ {x:,.2f}")
+        df_fmt["Qtd Operadores"] = df["Qtd Operadores"].astype(int)
+        df_fmt["Qtd Ating"] = df["Qtd Ating"].astype(int)
+        df_fmt["Dispersão (%)"] = df_fmt["Dispersão (%)"].map(lambda x: f"{x:.2f}%")
+        df_fmt["Média de dias zerados p/Loja"] = df_fmt["Média de dias zerados p/Loja"].round(0)
+
+        # -------------------------------------------------
+        # Barra textual Real x Meta com percentual
+        # -------------------------------------------------
+        def barra_com_percentual(real, meta, largura=18):
+            pct = min(real / meta, 1)
+            preenchido = int(pct * largura)
+            barra = "█" * preenchido + "░" * (largura - preenchido)
+            percentual = (real / meta) * 100
+            return barra, percentual  # retorna barra e valor separado
+
+        # Criar colunas separadas
+        df[["Barra", "Ating"]] = df.apply(
+            lambda x: pd.Series(barra_com_percentual(x["Real Acum"], x["Meta Acum"])),
+            axis=1
+        )
+
+        # Lista de cores do percentual
+        def cor_percentual(pct):
+            if pct >= 100:
+                return "#0070C0"
+            elif pct >= 80:
+                return "#00B050"
+            elif pct >= 70:
+                return "#FFC000"
+            elif pct >= 60:
+                return "#FF0000"
+            else:
+                return "#7030A0"
+
+        cores = df["Ating"].apply(cor_percentual).tolist()
+
+        # Coluna combinada no df_fmt
+        df_fmt["Real x Meta (%)"] = df["Barra"] + " " + df["Ating"].map(lambda x: f"{x:.2f}%")
+
+        def cor_dispersao(disp):
+            if disp <= 20:
+                return "#0070C0"
+            elif disp <= 45:
+                return "#00B050"
+            elif disp < 70:
+                return "#FFC000"
+            elif disp >= 70:
+                return "#FF0000"
+            else:
+                return "#FF0000"
+
+        cores_dispersao = df["Dispersão (%)"].apply(cor_dispersao).tolist()
+
+        # -------------------------------------------------
+        # Linha agregada REDE
+        # -------------------------------------------------
+        linha_rede = {
+            "Regional": "REDE",
+            "Real Acum": df["Real Acum"].sum(),
+            "Meta Acum": df["Meta Acum"].sum(),
+            "Produtividade": df["Produtividade"].mean(),
+            "Qtd Operadores": df["Qtd Operadores"].sum(),
+            "Qtd Ating": df["Qtd Ating"].sum(),
+            "Dispersão (%)": df["Dispersão (%)"].mean(),
+            "Média de dias zerados p/Loja": df["Média de dias zerados p/Loja"].mean()
+        }
+
+        cor_rede_dispersao = cor_dispersao(linha_rede["Dispersão (%)"])
+
+        # Barra + percentual da linha agregada
+        barra, ating = barra_com_percentual(linha_rede["Real Acum"], linha_rede["Meta Acum"])
+        linha_rede["Real x Meta (%)"] = f"{barra} {ating:.2f}%"
+        cor_rede = cor_percentual(ating)
+
+
+        # Formatar os números da linha REDE igual ao df_fmt
+        linha_rede["Real Acum"] = f"R$ {linha_rede['Real Acum']:,.2f}".replace(",", ".")
+        linha_rede["Meta Acum"] = f"R$ {linha_rede['Meta Acum']:,.2f}".replace(",", ".")
+        linha_rede["Produtividade"] = f"R$ {linha_rede['Produtividade']:,.2f}"
+        linha_rede["Qtd Operadores"] = int(linha_rede["Qtd Operadores"])
+        linha_rede["Qtd Ating"] = int(linha_rede["Qtd Ating"])
+        linha_rede["Dispersão (%)"] = f"{linha_rede['Dispersão (%)']:.2f}%"
+        linha_rede["Média de dias zerados p/Loja"] = round(linha_rede["Média de dias zerados p/Loja"], 0)
+
+        # Adicionar linha REDE ao df_fmt
+        df_fmt = pd.concat([df_fmt, pd.DataFrame([linha_rede])], ignore_index=True)
+        cores.append(cor_rede)  # adiciona cor da REDE à lista de cores
+        cores_dispersao.append(cor_rede_dispersao)
+
+        # -------------------------------------------------
+        # TABELA VISUAL COM LINHA REDE SOMBREADA
+        # -------------------------------------------------
+        st.markdown(f"<h3 style='text-align: center; margin-bottom: 5px;'>{produto}</h3>", unsafe_allow_html=True)
+
+        fig_table = go.Figure()
+
+        # Fundo: padrão branco e último (REDE) sombreado
+        fundo = [["white"]*len(df_fmt) for _ in range(9)]  # 9 colunas
+        sombreado = "#E0E0E0"
+        for col_idx in range(9):
+            fundo[col_idx][-1] = sombreado  # linha REDE sombreada
+
+        df_fmt["Dispersão (%)"] = df_fmt["Dispersão (%)"].apply(lambda x: f"<b>{x}</b>")
+
+        fig_table.add_trace(
+            go.Table(
+                header=dict(
+                    values=[
+                        "Regional",
+                        "Realizado Mensal",
+                        "Meta Mensal",
+                        "Atingimento (%)",
+                        "Produtividade Diária (Média por Consultor)",
+                        "Qtd. Operadores c/Meta",
+                        "Qtd. Atingindo Meta",
+                        "Dispersão (%)",
+                        "Média de dias zerados p/Loja"
+                    ],
+                    fill_color="#F2F2F2",
+                    align="center",
+                    font=dict(size=12, color="black")
+                ),
+                cells=dict(
+                    values=[
+                        df_fmt["Regional"],
+                        df_fmt["Real Acum"],
+                        df_fmt["Meta Acum"],
+                        df_fmt["Real x Meta (%)"],  # Barra + percentual
+                        df_fmt["Produtividade"],
+                        df_fmt["Qtd Operadores"],
+                        df_fmt["Qtd Ating"],
+                        df_fmt["Dispersão (%)"],
+                        df_fmt["Média de dias zerados p/Loja"]
+                    ],
+                    align="center",
+                    height=28,
+                    fill_color=fundo,
+                    font_color=[
+                        ["black"]*len(df_fmt),  # Regional
+                        ["black"]*len(df_fmt),  # Real Acum
+                        ["black"]*len(df_fmt),  # Meta Acum
+                        cores,                   # Real x Meta (%) -> cor do número
+                        ["black"]*len(df_fmt),  # Produtividade
+                        ["black"]*len(df_fmt),  # Qtd Operadores
+                        ["black"]*len(df_fmt),  # Qtd Ating
+                        cores_dispersao,  # Dispersão (%)
+                        ["black"]*len(df_fmt)   # Média de dias zerados
+                    ]
+                )
+            )
+        )
+
+        fig_table.update_layout(height=450)
+
+        st.plotly_chart(
+            aplicar_estilo(fig_table),
+            use_container_width=True
+        )
+
+# ======================================================
+# CONSOLIDADO
+# ======================================================
+
+elif pagina == "Desempenho Comercial":
+
+    st.sidebar.header("Filtros")
+
+    tipo = st.radio(
+        "Visualização",
         ["Diário", "Acumulado"],
         horizontal=True
     )
 
-    # ------- DIÁRIO -------
-    if modo == "Diário":
-        df["DesvioLabel"] = df['DESVIO_DIA_R$'].apply(lambda x: "Positivo" if x >= 0 else "Negativo")
+#----------------------------------------------------
+# filtros
+#------------------------------------------------------
 
-        fig1 = go.Figure()
-        fig1.add_bar(
-            x=df["DataLabel"],
-            y=df["Real_Variacao"],
-            name='Real Dia',
-            marker_color='#EA9411',
-            hovertemplate='<b>Data:</b> %{x}<br><b>Real:</b> R$ %{y:,.2f}<extra></extra>'
-        )
-        fig1.add_scatter(
-            x=df["DataLabel"],
-            y=df["Meta Dia"],
-            mode='lines+markers',
-            name='Meta Dia',
-            marker=dict(color='blue'),
-            hovertemplate='<b>Data:</b> %{x}<br><b>Meta Dia:</b> R$ %{y:,.2f}<extra></extra>'
-        )
-        fig1.update_layout(title="Diário (R$)", xaxis_title="Data")
-        fig1 = aplicar_estilo(fig1)
-        st.plotly_chart(fig1, use_container_width=True)
-
-        fig2 = go.Figure()
-        fig2.add_bar(
-            x=df["DataLabel"],
-            y=df["DESVIO_DIA_R$"],
-            marker_color=["#EA9411" if x >= 0 else "gray" for x in df["DESVIO_DIA_R$"]],
-            hovertemplate='<b>Data:</b> %{x}<br><b>Desvio Diário:</b> R$ %{y:,.2f}<extra></extra>'
-        )
-        fig2.add_hline(y=0, line_color="blue")
-        fig2.update_layout(title="Desvio Diário R$")
-        fig2 = aplicar_estilo(fig2)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # ------- ACUMULADO -------
-    else:
-        df["DesvioAcumLabel"] = df["DESVIO_ACUM"].apply(lambda x: "Positivo" if x >= 0 else "Negativo")
-
-        fig3 = go.Figure()
-        fig3.add_bar(
-            x=df["DataLabel"],
-            y=df["REAL_ACUM"],
-            name='Real Acumulado',
-            marker_color='#EA9411',
-            hovertemplate='<b>Data:</b> %{x}<br><b>Real:</b> R$ %{y:,.2f}<extra></extra>'
-        )
-        fig3.add_scatter(
-            x=df["DataLabel"],
-            y=df["META_ACUM"],
-            mode='lines+markers',
-            name='Meta Acumulada',
-            marker=dict(color='blue'),
-            hovertemplate='<b>Data:</b> %{x}<br><b>Meta:</b> R$ %{y:,.2f}<extra></extra>'
-        )
-        fig3.update_layout(title="Acumulado (R$)")
-        fig3 = aplicar_estilo(fig3)
-        st.plotly_chart(fig3, use_container_width=True)
-
-        fig4 = go.Figure()
-        fig4.add_bar(
-            x=df["DataLabel"],
-            y=df["DESVIO_ACUM"],
-            marker_color=["#EA9411" if x >= 0 else "gray" for x in df["DESVIO_ACUM"]],
-            hovertemplate='<b>Data:</b> %{x}<br><b>Desvio:</b> R$ %{y:,.2f}<extra></extra>'
-        )
-        fig4.add_hline(y=0, line_color="blue")
-        fig4.update_layout(title="Desvio Acumulado (R$)")
-        fig4 = aplicar_estilo(fig4)
-        st.plotly_chart(fig4, use_container_width=True)
-
-
-
-# ------------------------------------------------------
-# ###############   PÁGINA 1 — CONSOLIDADO   ###############
-# ------------------------------------------------------
-
-if pagina == "Consolidado":
-
-    st.header("Consolidado")
-
-    # ------------- SIDEBAR -------------
-    st.sidebar.header("Filtros")
-
-    produtos = ['Todos'] + sorted(rede['Produto'].dropna().unique().tolist())
-    produto_sel = st.sidebar.selectbox("Produto", produtos, index=0)
-
-    regionais = ['Todas'] + sorted(rede['Regional'].dropna().unique().tolist())
-    regional_sel = st.sidebar.selectbox("Regional", regionais, index=0)
-
-    df_reg = rede.copy()
-    if regional_sel != 'Todas':
-        df_reg = df_reg[df_reg['Regional'] == regional_sel]
-
-    coordenadores = ['Todos'] + sorted(df_reg['Coordenador'].dropna().unique().tolist())
-    coordenador_sel = st.sidebar.selectbox("Coordenador", coordenadores, index=0)
-
-    df_coord = df_reg.copy()
-    if coordenador_sel != 'Todos':
-        df_coord = df_coord[df_coord['Coordenador'] == coordenador_sel]
-
-    lojas = ['Todas'] + sorted(df_coord['Nome_Loja'].dropna().unique().tolist())
-    loja_sel = st.sidebar.selectbox("Loja", lojas, index=0)
-
-    anos = sorted(rede['Data'].dt.year.unique().tolist())
-    anos_sel = st.sidebar.selectbox("Ano", anos, index=len(anos)-1)
-
-    meses = sorted(rede['Data'].dt.month.unique().tolist())
-    mes_sel = st.sidebar.selectbox("Mês", meses, index=0)
-
-    # ------------ PROCESSAR DADOS ------------
-    df_f = filtrar_df(rede, produto_sel, regional_sel, coordenador_sel, loja_sel, mes_sel, anos_sel)
-
-    if df_f.empty:
-        st.warning("Nenhum dado após aplicar os filtros.")
-        st.stop()
-
-    df_grouped = calcular_acumulados(df_f)
-
-    st.markdown(
-        f"**Produto:** {produto_sel}  •  **Regional:** {regional_sel}  •  "
-        f"**Coordenador:** {coordenador_sel}  •  **Loja:** {loja_sel}  •  "
-        f"**Período:** {mes_sel}/{anos_sel}"
+    produto = st.sidebar.selectbox(
+        "Produto",
+        ['Todos'] + sorted(rede['produto'].dropna().unique())
+    )
+    regional = st.sidebar.selectbox(
+        "Regional",
+        ['Todas'] + sorted(rede['Regional'].dropna().unique())
     )
 
-    # ------------ PLOTAR GRÁFICOS ------------
-    plot_2x2(df_grouped, produto_sel, mes_sel, anos_sel)
+    if regional != 'Todas':
+        coords_disp = (
+            rede[rede['Regional'] == regional]['Coordenador']
+            .dropna()
+            .unique()
+        )
+    else:
+        coords_disp = rede['Coordenador'].dropna().unique()
 
-    # ------------ TABELA FINAL ------------
-    st.subheader("Tabela Consolidada")
+    coordenador = st.sidebar.selectbox(
+        "Coordenador",
+        ['Todos'] + sorted(coords_disp)
+    )
+    base_lojas = rede.copy()
 
-    df_exibir = df_grouped.copy()
+    if regional != 'Todas':
+        base_lojas = base_lojas[base_lojas['Regional'] == regional]
 
-    # Remover colunas da tabela final
-    cols_remover = ["DIAS", "Real_Variacao", "REAL_ACUM", "META_ACUM", "DESVIO_ACUM","DESVIO_DIA_R$"]
-    df_exibir = df_exibir.drop(columns=[c for c in cols_remover if c in df_exibir.columns])
+    if coordenador != 'Todos':
+        base_lojas = base_lojas[base_lojas['Coordenador'] == coordenador]
 
-    # Renomear colunas
-    df_exibir = df_exibir.rename(columns={
-        "DESVIO_DIA_PCT": "Desvio Dia %",
-        "DESVIO_ACUM_PCT": "Desvio Acumulado %"
-    })
+    lojas_disp = base_lojas['Nome_Loja'].dropna().unique()
 
-    # Formatar %
-    df_exibir["Desvio Dia %"] = df_exibir["Desvio Dia %"].apply(lambda x: f"{x:.2f}%")
-    df_exibir["Desvio Acumulado %"] = df_exibir["Desvio Acumulado %"].apply(lambda x: f"{x:.2f}%")
+    loja = st.sidebar.selectbox(
+        "Loja",
+        ['Todas'] + sorted(lojas_disp)
+    )
+    ano = st.sidebar.selectbox(
+        "Ano",
+        sorted(rede['ano'].dropna().unique())
+    )
 
-    # Criar colunas usando df_grouped (não df_exibir)
-    df_exibir['Producao Dia'] = df_grouped['Real_Variacao'].apply(format_large_numbers)
-    df_exibir['Meta Dia'] = df_grouped['Meta Dia'].apply(format_large_numbers)
-    df_exibir['Producao Acumulada'] = df_grouped['REAL_ACUM'].apply(format_large_numbers)
-    df_exibir['Meta Acumulada'] = df_grouped['META_ACUM'].apply(format_large_numbers)
-    df_exibir['Desvio Acumulado'] = df_grouped['DESVIO_ACUM'].apply(format_large_numbers)
-    df_exibir['Desvio Dia'] = df_grouped['DESVIO_DIA_R$'].apply(format_large_numbers)
+    mes = st.sidebar.selectbox(
+        "Mês",
+        sorted(rede['mes'].dropna().unique())
+    )
+    eixo_x = "Data"
 
-    ordem = [
-        "Data",
-        "Producao Dia",
-        "Meta Dia",
-        "Desvio Dia",
-        "Desvio Dia %",
-        "Producao Acumulada",
-        "Meta Acumulada",
-        "Desvio Acumulado",
-        "Desvio Acumulado %"
+    # --------------------------------------------------
+    # BASE SELECIONADA
+    # --------------------------------------------------
+    base_sel = rede.copy()
 
+    if produto != 'Todos':
+        base_sel = base_sel[base_sel['produto'] == produto]
+
+    if regional != 'Todas':
+        base_sel = base_sel[base_sel['Regional'] == regional]
+
+    if coordenador != 'Todos':
+        base_sel = base_sel[base_sel['Coordenador'] == coordenador]
+
+    if loja != 'Todas':
+        base_sel = base_sel[base_sel['Nome_Loja'] == loja]
+
+    base_sel = base_sel[
+        (base_sel['ano'] == ano) &
+        (base_sel['mes'] == mes)
     ]
 
-    df_exibir = df_exibir[ordem]
+    eixo_x = "Data"
+    df_sel = agregar(base_sel, eixo_x)
 
-    # Exibir
-    st.dataframe(df_exibir, use_container_width=True)
+    # --------------------------------------------------
+    # GRÁFICOS
+    # --------------------------------------------------
+    if tipo == "Diário":
 
-    # CSV (mesma lógica)
-    df_csv = df_grouped.copy()
-    df_csv = df_csv.drop(columns=[c for c in cols_remover if c in df_csv.columns])
-    df_csv = df_csv.rename(columns={
-        "DESVIO_DIA_PCT": "Desvio Dia %",
-        "DESVIO_ACUM_PCT": "Desvio Acumulado %"
-    })
+        grafico_consolidado(
+            df_sel,
+            eixo_x,
+            "Diário",
+            f"Diário — {mes}/{ano}"
+        )
 
-    csv = df_csv.to_csv(index=False).encode('utf-8-sig')
+        grafico_consolidado(
+            df_sel,
+            eixo_x,
+            "Desvio Diário (R$)",
+            f"Desvios da Meta — {mes}/{ano}"
+        )
 
-    st.download_button(
-        label="Baixar tabela em CSV",
-        data=csv,
-        file_name=f"consolidado_{mes_sel}_{anos_sel}.csv",
-        mime="text/csv"
+    elif tipo == "Acumulado":
+
+        grafico_consolidado(
+            df_sel,
+            eixo_x,
+            "Acumulado",
+            f"Acumulado — {mes}/{ano}"
+        )
+
+        grafico_consolidado(
+            df_sel,
+            eixo_x,
+            "Desvio Acumulado (R$)",
+            f"Desvio da Meta — {mes}/{ano}"
+        )
+
+#----------------------------------------
+#
+#----------------------------------------
+
+elif pagina == "Produtividade & Comparativos":
+
+    st.sidebar.header("Filtros")
+
+    modo_comp = st.checkbox("Comparar com Média do Grupo")
+
+#----------------------------------------------------
+# filtros do comparativo
+#------------------------------------------------------
+
+    produto = st.sidebar.selectbox(
+        "Produto",
+        ['Todos'] + sorted(rede['produto'].dropna().unique())
     )
 
-# ------------------------------------------------------
-# ###############   PÁGINA 2 — RANKING E METAS   ###############
-# ------------------------------------------------------
-
-elif pagina == "Ranking e Metas":
-
-    st.header("Ranking e Metas")
-
-    # ------------------ SIDEBAR ------------------
-    st.sidebar.header("Filtros — Ranking")
-
-    # Filtros dinâmicos
-    regionais = ['Todas'] + sorted(rede['Regional'].dropna().unique())
-    regional_widget = st.sidebar.selectbox("Regional", regionais, index=0)
-
-    df_filtros = rede.copy()
-    if regional_widget != 'Todas':
-        df_filtros = df_filtros[df_filtros['Regional'] == regional_widget]
-
-    coordenadores = ['Todos'] + sorted(df_filtros['Coordenador'].dropna().unique())
-    coordenador_widget = st.sidebar.selectbox("Coordenador", coordenadores, index=0)
-
-    if coordenador_widget != 'Todos':
-        df_filtros = df_filtros[df_filtros['Coordenador'] == coordenador_widget]
-
-    produtos = ['Todos'] + sorted(df_filtros['Produto'].dropna().unique())
-    produto_widget = st.sidebar.selectbox("Produto", produtos, index=0)
-
-    anos = sorted(rede['Data'].dt.year.unique())
-    ano_widget = st.sidebar.selectbox("Ano", anos, index=len(anos)-1)
-
-    meses = sorted(rede['Data'].dt.month.unique())
-    mes_widget = st.sidebar.selectbox("Mês", meses, index=0)
-
-    tipo_ranking = st.radio(
-        "Tipo de Ranking",
-        ["Produção", "Desvio da Meta"],
-        index=0
+    # -----------------------------
+    # REGIONAL
+    # -----------------------------
+    regional = st.sidebar.selectbox(
+        "Regional",
+        ['Todas'] + sorted(rede['Regional'].dropna().unique())
     )
 
-    # ----------------------------------------------------
-    # FUNÇÃO AUXILIAR PARA APLICAR FILTROS
-    # ----------------------------------------------------
-    def filtrar_dados(produto, regional, coordenador, mes, ano):
-        df = rede.copy()
+    # -----------------------------
+    # COORDENADOR (DEPENDE DA REGIONAL)
+    # -----------------------------
+    if regional != 'Todas':
+        coords_disp = (
+            rede[rede['Regional'] == regional]['Coordenador']
+            .dropna()
+            .unique()
+        )
+    else:
+        coords_disp = rede['Coordenador'].dropna().unique()
 
-        if regional != 'Todas':
-            df = df[df['Regional'] == regional]
+    coordenador = st.sidebar.selectbox(
+        "Coordenador",
+        ['Todos'] + sorted(coords_disp)
+    )
 
-        if coordenador != 'Todos':
-            df = df[df['Coordenador'] == coordenador]
-            grupo = 'Nome_Loja'
+    # -----------------------------
+    # LOJA (DEPENDE DE REGIONAL + COORDENADOR)
+    # -----------------------------
+    base_lojas = rede.copy()
+
+    if regional != 'Todas':
+        base_lojas = base_lojas[base_lojas['Regional'] == regional]
+
+    if coordenador != 'Todos':
+        base_lojas = base_lojas[base_lojas['Coordenador'] == coordenador]
+
+    lojas_disp = base_lojas['Nome_Loja'].dropna().unique()
+
+    loja = st.sidebar.selectbox(
+        "Loja",
+        ['Todas'] + sorted(lojas_disp)
+    )
+
+    # -----------------------------
+    # PERÍODO
+    # -----------------------------
+    ano = st.sidebar.selectbox(
+        "Ano",
+        sorted(rede['ano'].dropna().unique())
+    )
+
+    mes = st.sidebar.selectbox(
+        "Mês",
+        sorted(rede['mes'].dropna().unique())
+    )
+
+    # --------------------------------------------------
+    # EIXO SEMPRE TEMPORAL
+    # --------------------------------------------------
+    eixo_x = "Data"
+
+    # --------------------------------------------------
+    # BASE SELECIONADA (Agrega filtros)
+    # --------------------------------------------------
+    base_sel = rede.copy()
+
+    if produto != 'Todos':
+        base_sel = base_sel[base_sel['produto'] == produto]
+
+    if regional != 'Todas':
+        base_sel = base_sel[base_sel['Regional'] == regional]
+
+    if coordenador != 'Todos':
+        base_sel = base_sel[base_sel['Coordenador'] == coordenador]
+
+    if loja != 'Todas':
+        base_sel = base_sel[base_sel['Nome_Loja'] == loja]
+
+    base_sel = base_sel[
+        (base_sel['ano'] == ano) &
+        (base_sel['mes'] == mes)
+    ]
+#--------------------------------
+# modelo de agregação
+#-------------------------------
+    df_sel = agregar_produtividade_diaria_com_media(base_sel)
+
+    # ==================================================
+    # COMPARATIVO → SOMENTE DIÁRIO
+    # ==================================================
+    if modo_comp and (
+        produto != 'Todos' or
+        regional != 'Todas' or
+        coordenador != 'Todos' or
+        loja != 'Todas'
+    ):
+
+        base_total = construir_base_total_produtividade(
+            rede,
+            produto,
+            regional,
+            coordenador,
+            loja,
+            ano,
+            mes
+        )
+
+        df_total = base_total.copy()
+
+        df_total = df_total[
+            df_total["Data"].isin(df_sel["Data"])
+        ]
+
+        # ✅ AQUI é o lugar correto
+        df_total = calcular_pct_atingimento(df_total)
+        df_sel   = calcular_pct_atingimento(df_sel)
+
+        # ----------------------------------------
+        # DESVIO VS MÉDIA (agragação comparativo)
+        # ----------------------------------------
+        df_comp = df_sel.merge(
+            df_total[["Data", "produtividade"]],
+            on="Data",
+            how="left",
+            suffixes=("", "_MEDIA")
+        )
+
+        df_comp["DESVIO_MEDIA"] = (
+            df_comp["produtividade"] -
+            df_comp["produtividade_MEDIA"]
+        )
+
+        df_comp["DESVIO_MEDIA_PCT"] = (
+            df_comp["DESVIO_MEDIA"] /
+            df_comp["produtividade_MEDIA"].replace(0, np.nan)
+        ) * 100
+
+        df_comp = df_comp.fillna(0)
+
+
+        # ----------------------------------------
+        # LABEL DINÂMICO DO SELECIONADO
+        # ----------------------------------------
+        if loja != 'Todas':
+            label_sel = loja
+        elif coordenador != 'Todos':
+            label_sel = coordenador
+        elif regional != 'Todas':
+            label_sel = regional
         else:
-            grupo = 'Coordenador'
+            label_sel = "Rede"
 
-        if produto != 'Todos':
-            df = df[df['Produto'] == produto]
+        # ----------------------------------------
+        # LABEL DINÂMICO DO TOTAL (MÉDIA)
+        # ----------------------------------------
+        if loja != 'Todas':
+            label_total = "Média das Lojas do Coordenador"
+        elif coordenador != 'Todos':
+            label_total = "Média dos Coordenadores da Regional"
+        elif regional != 'Todas':
+            label_total = "Média das Regionais"
+        else:
+            label_total = "Média da Rede"
 
-        df = df[(df['Data'].dt.month == mes) & (df['Data'].dt.year == ano)]
+        # -----------------------------
+        # GRÁFICO PRODUTIVIDADE
+        # -----------------------------
 
-        return df, grupo
+        grafico_comparativo(
+            df_sel,
+            df_total,
+            eixo_x,
+            f"Produtividade — {label_sel}  <>  {label_total}",
+            label_total,
+            label_sel
+        )
 
-    # ----------------------------------------------------
-    # FUNÇÃO 1 — RANKING REAL X META
-    # ----------------------------------------------------
-    def plot_ranking(produto, regional, coordenador, mes, ano):
-        df_f, grupo = filtrar_dados(produto, regional, coordenador, mes, ano)
+        # -----------------------------
+        # DESVIO VS MÉDIA (R$)
+        # -----------------------------
 
-        if df_f.empty:
-            st.warning("Nenhum dado após aplicar os filtros.")
-            return pd.DataFrame(), grupo
+        grafico_consolidado(
+            df_comp,
+            eixo_x,
+            "Desvio vs Média (R$)",
+            f"Desvio em Relação a {label_total} — {mes}/{ano}",
+            label_total=label_total
+        )
 
-        ranking = df_f.groupby(grupo)[['Real_Variacao', 'Meta Dia']].sum().reset_index()
-        ranking.rename(columns={'Real_Variacao': 'Real_Acumulada', 'Meta Dia': 'Meta_Acumulada'}, inplace=True)
+    else:
+        # ==================================================
+        # CONSOLIDADO SIMPLES (SEM COMPARATIVO)
+        # ==================================================
+        grafico_consolidado(
+            df_sel,
+            eixo_x,
+            "Produtividade Diária",
+            f"Média de Produção por Consultor — {mes}/{ano}"
+        )
 
-        # Peso total = Real acumulado do grupo / Real acumulado total
-        total_real = ranking['Real_Acumulada'].sum()
-        ranking['Peso_Producao_%'] = ranking['Real_Acumulada'] / total_real
+        grafico_consolidado(
+            df_sel,
+            eixo_x,
+            "Desvio vs Média Mensal (R$)",
+            f"Desvio da Média Mensal — {mes}/{ano}"
+        )
 
-        # Desvio %
-        ranking['Desvio_%'] = (ranking['Real_Acumulada'] - ranking['Meta_Acumulada']) / ranking['Meta_Acumulada']
 
-        # Impacto = Desvio% × Peso
-        ranking['Impacto'] = ranking['Desvio_%'] * ranking['Peso_Producao_%']
 
-        ranking.sort_values('Real_Acumulada', inplace=True)
+# ======================================================
+# RANKING E METAS
+# ======================================================
+elif pagina in ["Ranking & Metas"]:
 
-        # Quebra o nome em duas linhas
-        def wrap(texto):
-            palavras = texto.split()
-            if len(palavras) <= 1:
-                return texto
-            meio = len(palavras) // 2
-            return f"{' '.join(palavras[:meio])}<br>{' '.join(palavras[meio:])}"
+    st.sidebar.header("Filtros")
 
-        ranking["label_wrap"] = ranking[grupo].apply(wrap)
+    # --------------------------------
+    # DATAFRAME BASE PARA FILTROS
+    # --------------------------------
+    df_filtro = rede.copy()
+
+    # --------------------------------
+    # REGIONAL
+    # --------------------------------
+    regional = st.sidebar.selectbox(
+        "Regional",
+        ["Todas"] + sorted(df_filtro["Regional"].dropna().unique())
+    )
+
+    if regional != "Todas":
+        df_filtro = df_filtro[df_filtro["Regional"] == regional]
+
+    # --------------------------------
+    # COORDENADOR (RESTRITO À REGIONAL)
+    # --------------------------------
+    coordenador = st.sidebar.selectbox(
+        "Coordenador",
+        ["Todos"] + sorted(df_filtro["Coordenador"].dropna().unique())
+    )
+
+    if coordenador != "Todos":
+        df_filtro = df_filtro[df_filtro["Coordenador"] == coordenador]
+        grupo = "Nome_Loja"
+    else:
+        grupo = "Coordenador"
+
+    # --------------------------------
+    # PRODUTO (RESTRITO À REGIONAL + COORDENADOR)
+    # --------------------------------
+    produto = st.sidebar.selectbox(
+        "Produto",
+        ["Todos"] + sorted(df_filtro["produto"].dropna().unique())
+    )
+
+    if produto != "Todos":
+        df_filtro = df_filtro[df_filtro["produto"] == produto]
+
+    # --------------------------------
+    # ANO / MÊS (PODEM OU NÃO SER ENCADEADOS)
+    # --------------------------------
+    ano = st.sidebar.selectbox(
+        "Ano",
+        sorted(df_filtro["ano"].dropna().unique())
+    )
+
+    mes = st.sidebar.selectbox(
+        "Mês",
+        sorted(df_filtro["mes"].dropna().unique())
+    )
+
+    # --------------------------------
+    # VISUALIZAÇÃO
+    # --------------------------------
+    modo_rank = st.radio(
+        "Visualização", ["Ranking", "Desvio"], horizontal=True
+    )
+
+    # --------------------------------
+    # APLICA FILTROS FINAIS
+    # --------------------------------
+    df = df_filtro[
+        (df_filtro["ano"] == ano) &
+        (df_filtro["mes"] == mes)
+    ]
+
+    # ------------------------------
+    # AGREGAÇÃO
+    # ------------------------------
+    ranking = (
+        df.groupby(grupo, as_index=False)
+          .agg({
+              "Real_Variacao": "sum",
+              "Meta Dia": "sum"
+          })
+    )
+
+    ranking["Desvio"] = ranking["Real_Variacao"] - ranking["Meta Dia"]
+
+    # ------------------------------
+    # FUNÇÃO PARA QUEBRAR LABEL
+    # ------------------------------
+    def quebrar_label(texto, max_chars=18):
+        palavras = texto.split()
+        linhas = []
+        linha_atual = ""
+
+        for palavra in palavras:
+            if len(linha_atual) + len(palavra) <= max_chars:
+                linha_atual += (" " if linha_atual else "") + palavra
+            else:
+                linhas.append(linha_atual)
+                linha_atual = palavra
+
+        linhas.append(linha_atual)
+        return "<br>".join(linhas)
+
+    ranking["label_wrap"] = ranking[grupo].apply(quebrar_label)
+
+    # ------------------------------
+    # ORDENAÇÃO
+    # ------------------------------
+    if modo_rank == "Ranking":
+        ranking.sort_values("Real_Variacao", inplace=True)
+    else:
+        ranking.sort_values("Desvio", inplace=True)
+
+    # ------------------------------
+    # GRÁFICOS
+    # ------------------------------
+    if modo_rank == "Ranking":
 
         fig = go.Figure()
 
         fig.add_bar(
             y=ranking["label_wrap"],
-            x=ranking['Real_Acumulada'],
-            orientation='h',
-            name="Real Acumulado",
+            x=ranking["Real_Variacao"],
+            orientation="h",
             marker_color="#EA9411",
+            name="Real Acumulado",
             hovertemplate="<b>%{y}</b><br>Real: R$ %{x:,.0f}<extra></extra>"
         )
 
         fig.add_scatter(
             y=ranking["label_wrap"],
-            x=ranking['Meta_Acumulada'],
-            mode='markers',
+            x=ranking["Meta Dia"],
+            mode="markers",
+            marker=dict(size=12, symbol="diamond", color="blue"),
             name="Meta Acumulada",
-            marker=dict(size=8, symbol="diamond", color="blue"),
             hovertemplate="<b>%{y}</b><br>Meta: R$ %{x:,.0f}<extra></extra>"
         )
 
         fig.update_layout(
-            title=f"Ranking {grupo} ({mes}/{ano})",
-            template="plotly_white",
-            height=max(len(ranking) * 50,300),
-            dragmode=False,
-            legend=dict(
-                orientation="h",  # horizontal
-                yanchor="bottom",
-                y=0.98,           # acima do gráfico
-                xanchor="center",
-                x=0.5
-            )
+            title=dict(text="Ranking", y=0.97, yanchor="top", x=0.5, xanchor="center"),
+            height=len(ranking) * 60,
+            yaxis=dict(automargin=True)
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(aplicar_estilo(fig), use_container_width=True)
 
-        return ranking, grupo
-
-    # ----------------------------------------------------
-    # FUNÇÃO 2 — RANKING POR DESVIO
-    # ----------------------------------------------------
-    def plot_ranking_desvio(produto, regional, coordenador, mes, ano):
-        df_f, grupo = filtrar_dados(produto, regional, coordenador, mes, ano)
-
-        if df_f.empty:
-            st.warning("Nenhum dado após aplicar os filtros.")
-            return pd.DataFrame(), grupo
-
-        ranking = df_f.groupby(grupo)[['Real_Variacao', 'Meta Dia']].sum().reset_index()
-        ranking['Desvio'] = ranking['Real_Variacao'] - ranking['Meta Dia']
-
-        # Peso total = Real acumulado / total
-        total_real = ranking['Real_Variacao'].sum()
-        ranking['Peso_Producao_%'] = ranking['Real_Variacao'] / total_real
-
-        # Desvio %
-        ranking['Desvio_%'] = ranking['Desvio'] / ranking['Meta Dia']
-
-        # Impacto
-        ranking['Impacto'] = ranking['Desvio_%'] * ranking['Peso_Producao_%']
-
-        ranking['Cor'] = ranking['Desvio'].apply(lambda x: "#EA9411" if x > 0 else "gray")
-        ranking.sort_values('Desvio', inplace=True)
-
-        # Quebra o nome em duas linhas
-        def wrap(texto):
-            palavras = texto.split()
-            if len(palavras) <= 1:
-                return texto
-            meio = len(palavras) // 2
-            return f"{' '.join(palavras[:meio])}<br>{' '.join(palavras[meio:])}"
-
-        ranking["label_wrap"] = ranking[grupo].apply(wrap)
+    else:
 
         fig = go.Figure()
 
@@ -644,140 +1429,206 @@ elif pagina == "Ranking e Metas":
             y=ranking["label_wrap"],
             x=ranking["Desvio"],
             orientation="h",
-            marker_color=ranking['Cor'],
-            name="Desvio (valor)",
+            marker_color=[
+                "#EA9411" if x >= 0 else "gray"
+                for x in ranking["Desvio"]
+            ],
             hovertemplate="<b>%{y}</b><br>Desvio: R$ %{x:,.0f}<extra></extra>"
         )
 
         fig.update_layout(
-            title=f"Ranking por Desvio — {grupo} ({mes}/{ano})",
-            template="plotly_white",
-            height=max(len(ranking) * 50,300),
-            xaxis_title="Desvio (Valor)",
-            dragmode=False,
+            title="Ranking",
+            height=len(ranking) * 60,
+            yaxis=dict(automargin=True),
+            showlegend=False,
+            bargap=0.20
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(aplicar_estilo(fig), use_container_width=True)
 
-        return ranking, grupo
+    # ------------------------------
+    # TABELA
+    # ------------------------------
+    st.subheader("Tabela Metas")
 
-    # ----------------------------------------------------
-    # FUNÇÃO — TABELA E DOWNLOAD (COMPARTILHADA)
-    # ----------------------------------------------------
-    def gerar_tabela_ranking(ranking, grupo, mes, ano, tipo_ranking):
-        st.subheader("Tabela de Ranking")
+    ranking["Desvio %"] = (
+        ranking["Desvio"]
+        / ranking["Meta Dia"].replace(0, np.nan)
+        * 100
+    ).map(lambda x: f"{x:.2f}%")
 
-        df_tab = ranking.copy()
+    st.dataframe(ranking, use_container_width=True)
 
-        # ----------------------------------------------------
-        # 1. RENOMEAR COLUNAS PARA EXIBIÇÃO
-        # ----------------------------------------------------
-        rename_map = {
-            'Real_Variacao': 'Produção_Mensal',
-            'Meta Dia': 'Meta_Mensal',
-            'Real_Acumulada': 'Produção Mensal',
-            'Meta_Acumulada': 'Meta Mensal'
-        }
-        df_tab = df_tab.rename(columns={k: v for k, v in rename_map.items() if k in df_tab.columns})
+  #-----------------------------------
+  # Produtos
+  #-------------------------------------
+elif pagina == "Análise por Produto":
 
-        # ----------------------------------------------------
-        # 2. REMOVER COLUNAS AUXILIARES
-        # ----------------------------------------------------
-        if tipo_ranking == "Produção":
-            if 'label_wrap' in df_tab.columns:
-                df_tab = df_tab.drop(columns=['label_wrap'])
-        else:  # Ranking por Desvio
-            cols_to_drop = [c for c in ['label_wrap', 'Cor'] if c in df_tab.columns]
-            if cols_to_drop:
-                df_tab = df_tab.drop(columns=cols_to_drop)
+    st.sidebar.header("Filtros")
 
-        # ----------------------------------------------------
-        # 3. GARANTIR COLUNA 'Desvio' (R$) NO RANKING PRODUÇÃO
-        # ----------------------------------------------------
-        if tipo_ranking == "Produção":
-            # Esperamos que o ranking de Produção tenha Real_Acumulada e Meta_Acumulada
-            if 'Produção Mensal' in df_tab.columns and 'Meta Mensal' in df_tab.columns:
-                df_tab['Produção Mensal'] = pd.to_numeric(df_tab['Produção Mensal'], errors='coerce')
-                df_tab['Meta Mensal'] = pd.to_numeric(df_tab['Meta Mensal'], errors='coerce')
-                df_tab['Desvio'] = df_tab['Produção Mensal'] - df_tab['Meta Mensal']
-        else:
-            # No ranking por Desvio assumimos que 'Desvio' já existe no dataframe (calculado em plot_ranking_desvio)
-            # Não criamos 'Desvio R$' extra aqui.
-            pass
+    # --------------------------------------------------
+    # BASE CANÔNICA (produto já normalizado)
+    # --------------------------------------------------
+    df_base = base_zerado.copy()
+    df_base["Data"] = pd.to_datetime(df_base["Data"])
 
-        # ----------------------------------------------------
-        # 4. FORMATAÇÃO NÚMEROS GRANDES (R$)
-        # ----------------------------------------------------
-        for col in ['Produção_Mensal', 'Meta_Mensal', 'Produção Mensal', 'Meta Mensal', 'Desvio']:
-            if col in df_tab.columns:
-                df_tab[col] = df_tab[col].apply(lambda x: format_large_numbers(x) if pd.notna(x) and x != "" else "")
+    # --------------------------------------------------
+    # 1️⃣ PRODUTO (OBRIGATÓRIO)
+    # --------------------------------------------------
+    produto = st.sidebar.selectbox(
+        "Produto",
+        sorted(df_base["produto"].unique())
+    )
+    df_base = df_base[df_base["produto"] == produto]
 
-        # ----------------------------------------------------
-        # 5. FORMATAR PORCENTAGENS
-        # ----------------------------------------------------
-        if 'Desvio_%' in df_tab.columns:
-            df_tab['Desvio_%'] = (df_tab['Desvio_%'] * 100).round(2).astype(str) + '%'
-        if 'Peso_Producao_%' in df_tab.columns:
-            df_tab['Peso_Producao_%'] = (df_tab['Peso_Producao_%'] * 100).round(2).astype(str) + '%'
-        if 'Impacto' in df_tab.columns:
-            df_tab['Impacto'] = (df_tab['Impacto'] * 100).round(2).astype(str) + '%'
+    # --------------------------------------------------
+    # 2️⃣ REGIONAL (OBRIGATÓRIO)
+    # --------------------------------------------------
+    regional = st.sidebar.selectbox(
+        "Regional",
+        sorted(df_base["Regional"].dropna().unique())
+    )
+    df_base = df_base[df_base["Regional"] == regional]
 
-        # ----------------------------------------------------
-        # 6. ORDEM DAS COLUNAS
-        # ----------------------------------------------------
-        if tipo_ranking == "Produção":
-            ordem = [
-                grupo,
-                "Produção Mensal",
-                "Meta Mensal",
-                "Desvio",
-                "Peso_Producao_%",
-                "Desvio_%",
-                "Impacto"
-            ]
-        else:
-            ordem = [
-                grupo,
-                'Produção_Mensal',
-                "Meta_Mensal",
-                "Desvio",
-                "Peso_Producao_%",
-                "Desvio_%",
-                "Impacto"
-            ]
+    # --------------------------------------------------
+    # 3️⃣ COORDENADOR (OBRIGATÓRIO)
+    # --------------------------------------------------
+    coordenador = st.sidebar.selectbox(
+        "Coordenador",
+        sorted(df_base["Coordenador"].dropna().unique())
+    )
+    df_base = df_base[df_base["Coordenador"] == coordenador]
 
-        ordem_final = [c for c in ordem if c in df_tab.columns]
-        df_tab = df_tab.reindex(columns=ordem_final)
+    # --------------------------------------------------
+    # 4️⃣ TEMPO (Ano e Mês obrigatórios)
+    # --------------------------------------------------
+    ano = st.sidebar.selectbox(
+        "Ano",
+        sorted(df_base["ano"].unique())
+    )
+    df_base = df_base[df_base["ano"] == ano]
 
-        # ----------------------------------------------------
-        # 7. ESTILO (Impacto em cinza)
-        # ----------------------------------------------------
-        if 'Impacto' in df_tab.columns:
-            df_tab_styled = df_tab.style.applymap(
-                lambda x: 'background-color: #4d4d4d; color: white;' if isinstance(x, str) and x.endswith('%') else '',
-                subset=['Impacto']
-            )
-            st.dataframe(df_tab_styled, use_container_width=True)
-        else:
-            st.dataframe(df_tab, use_container_width=True)
+    mes = st.sidebar.selectbox(
+        "Mês",
+        sorted(df_base["mes"].unique())
+    )
+    df_base = df_base[df_base["mes"] == mes]
 
-        # ----------------------------------------------------
-        # 8. DOWNLOAD CSV
-        # ----------------------------------------------------
-        csv = df_tab.to_csv(index=False, encoding='utf-8-sig')
-        st.download_button(
-            label="Baixar tabela em CSV",
-            data=csv,
-            file_name=f"ranking_{grupo}_{mes}_{ano}.csv",
-            mime="text/csv"
+    # --------------------------------------------------
+    # CÁLCULO DE DIAS COM E SEM PRODUÇÃO
+    # --------------------------------------------------
+    # Para cada loja e dia, se o produto não produziu → Sem Produção
+    df_dia = df_base[["Nome_Loja", "Data", "dia_sem_producao"]].copy()
+
+
+    df_dia["dia_sem_producao"] = df_dia["dia_sem_producao"].fillna(1).astype(int)
+
+    df_dia["Status"] = np.where(
+        df_dia["dia_sem_producao"] == 1,
+        "Não Houve Produção",
+        "Houve Produção"
+    )
+
+    # --------------------------------------------------
+    # TOTAIS E RANKING
+    # --------------------------------------------------
+    totais = (
+        df_dia[df_dia["Status"] == "Não Houve Produção"]
+        .groupby("Nome_Loja")["Data"]
+        .nunique()
+        .reset_index(name="Dias Sem Produção")
+    )
+
+    ranking_lojas = (
+        totais
+        .sort_values("Dias Sem Produção", ascending=False)["Nome_Loja"]
+        .tolist()
+    )
+
+    df_dia["Nome_Loja"] = pd.Categorical(
+        df_dia["Nome_Loja"],
+        categories=ranking_lojas,
+        ordered=True
+    )
+
+    # --------------------------------------------------
+    # TÍTULO
+    # --------------------------------------------------
+    st.title(f"Matriz de Lojas Zeradas D-1 - {produto}")
+
+    # --------------------------------------------------
+    # GRÁFICO SCATTER (MAPA)
+    # --------------------------------------------------
+    import plotly.express as px
+
+    fig = px.scatter(
+        df_dia,
+        x="Data",
+        y="Nome_Loja",
+        color="Status",
+        labels={
+            "Nome_Loja": "Loja",
+            "Data": "Data",
+            "Status": "Status"
+        },
+        color_discrete_map={
+            "Houve Produção": "#2E7D32",
+            "Não Houve Produção": "#C62828"
+        },
+        height=420
+    )
+    # RANKING
+    fig.update_yaxes(
+        categoryorder="array",
+        categoryarray=ranking_lojas
+    )
+
+    fig.update_traces(
+        hovertemplate=
+            "<b>Loja:</b> %{y}<br>"
+            "<b>Data:</b> %{x|%d/%m}<br>"
+            "<b>Status:</b> %{customdata[0]}"
+            "<extra></extra>"
+    )
+
+    fig.update_traces(
+        marker=dict(size=16, line=dict(width=0.8, color="#333"))
+    )
+
+    # Linhas horizontais (efeito ranking)
+    for i, _ in enumerate(ranking_lojas):
+        fig.add_hline(
+            y=i - 0.5,
+            line_width=1,
+            line_color="#E0E0E0",
+            layer="below"
         )
 
-    # ----------------------------------------------------
-    # EXECUÇÃO — GRÁFICO + TABELA (compartilhada)
-    # ----------------------------------------------------
-    if tipo_ranking == "Produção":
-        ranking, grupo = plot_ranking(produto_widget, regional_widget, coordenador_widget, mes_widget, ano_widget)
-    else:
-        ranking, grupo = plot_ranking_desvio(produto_widget, regional_widget, coordenador_widget, mes_widget, ano_widget)
+    # Coluna de totais à direita
+    data_ref = df_dia["Data"].max().strftime("%d/%m")
+    for _, row in totais.iterrows():
+        fig.add_annotation(
+            x=df_dia["Data"].max() + pd.Timedelta(days=0.5),
+            y=row["Nome_Loja"],
+            text=f"<b>{int(row['Dias Sem Produção'])}</b>",
+            showarrow=False,
+            font=dict(size=13, color="#B71C1C")
+        )
 
-    gerar_tabela_ranking(ranking, grupo, mes_widget, ano_widget, tipo_ranking)
+    fig.update_xaxes(
+        range=[
+            df_dia["Data"].min(),
+            df_dia["Data"].max() + pd.Timedelta(days=1)
+        ]
+    )
+
+    fig.update_layout(
+        xaxis_title="Data",
+        yaxis_title="Lojas",
+        legend_title="Status",
+        plot_bgcolor="white",
+        dragmode=False,
+        margin=dict(l=80, r=120, t=60, b=40)
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
