@@ -28,7 +28,7 @@ st.set_page_config(page_title="Acomp. Diário de Vendas FACTA D-1  (Visão 360º
 
 @st.cache_data
 def carregar_base():
-    df = pd.read_parquet("consolidado.parquet")
+    df = pd.read_parquet("consolidado.parquet", engine="pyarrow")
     df["Data"] = pd.to_datetime(df["Data"])
     return df
 
