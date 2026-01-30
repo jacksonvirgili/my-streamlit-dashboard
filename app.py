@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 # ------------------------------------------------------
 # Layout e Título
 # ------------------------------------------------------
-st.set_page_config(page_title="Acomp. Diário de Vendas FACTA D-1  (Visão 360º)", layout="wide")
+st.set_page_config(page_title="Acomp. Diário de Vendas  (Visão 360º)", layout="wide")
 
 #------------------------------------------------------
 # Cache e carregamento da base
@@ -696,7 +696,7 @@ def grafico_produtividade(df, eixo_x, titulo):
 # APP
 # ======================================================
 
-st.title("Acomp. Diário de Vendas FACTA M-1 (Visão 360º)")
+st.title("Acomp. Diário de Vendas (Visão 360º)")
 
 pagina = st.selectbox("Página", ["Painel Executivo","Desempenho Comercial","Produtividade & Comparativos", "Ranking & Metas", "Análise por Produto"])
 
@@ -1554,7 +1554,7 @@ elif pagina == "Análise por Produto":
     # --------------------------------------------------
     # TÍTULO
     # --------------------------------------------------
-    st.title(f"Matriz de Lojas Zeradas D-1 - {produto}")
+    st.title(f"Matriz de Lojas Zeradas - {produto}")
 
     # --------------------------------------------------
     # GRÁFICO SCATTER (MAPA)
